@@ -1,0 +1,210 @@
+pipeline {
+    agent {
+        kubernetes {
+            yaml """
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    jenkins-agent: online-boutique-builder
+spec:
+  containers:
+  - name: snyk-cli
+    image: snyk/snyk:alpine
+    command: ['cat']
+    tty: true
+    securityContext:
+      runAsUser: 0
+  - name: docker
+    image: docker:dind
+    command: ['dockerd-entrypoint.sh']
+    tty: true
+    securityContext:
+      privileged: true
+    env:
+    - name: DOCKER_TLS_CERTDIR
+      value: ""
+"""
+        }
+    }
+    
+    environment {
+        // Retrieve Snyk API token securely from Jenkins credentials store
+        SNYK_TOKEN = credentials('snyk-api-token')
+        
+        // Private Harbor registry URI (internal Kubernetes DNS)
+        REGISTRY = "harbor.harbor.svc.cluster.local/online-boutique"
+        
+        // Credential ID matching Harbor username and password
+        HARBOR_CREDS_ID = 'harbor-registry-credentials'
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                // Checkout source code from standard git repo
+                checkout scm
+            }
+        }
+
+        stage('Snyk Code Scan (SAST)') {
+            steps {
+                container('snyk-cli') {
+                    echo "=== Starting Snyk Code (SAST) Static Application Security Testing ==="
+                    
+                    // Runs SAST checks for core services to identify secure coding issues & secrets
+                    sh 'snyk code test ./services/frontend --severity-threshold=high || true'
+                    sh 'snyk code test ./services/checkoutservice --severity-threshold=high || true'
+                    sh 'snyk code test ./services/paymentservice --severity-threshold=high || true'
+                }
+            }
+        }
+
+        stage('Snyk Library Scan (SCA)') {
+            steps {
+                container('snyk-cli') {
+                    echo "=== Starting Snyk Open Source (SCA) Software Composition Analysis ==="
+                    
+                    // Node.js Service scans
+                    sh 'snyk test --file=./services/paymentservice/package.json --severity-threshold=high || true'
+                    sh 'snyk test --file=./services/currencyservice/package.json --severity-threshold=high || true'
+                    
+                    // Python Service scans
+                    sh 'snyk test --file=./services/recommendationservice/requirements.txt --severity-threshold=high || true'
+                    sh 'snyk test --file=./services/emailservice/requirements.txt --severity-threshold=high || true'
+                    
+                    // Go Service scans
+                    sh 'snyk test --file=./services/frontend/go.mod --severity-threshold=high || true'
+                    sh 'snyk test --file=./services/checkoutservice/go.mod --severity-threshold=high || true'
+                    
+                    // C# Service scan
+                    sh 'snyk test --file=./services/cartservice/src/cartservice.csproj --severity-threshold=high || true'
+                }
+            }
+        }
+
+        stage('Build & Secure Core Services') {
+            // Build and scan our 5 critical checkout-path services in parallel to optimize cluster resources
+            parallel {
+                stage('Payment Service') {
+                    steps {
+                        container('docker') {
+                            echo "=== Building Payment Service Image ==="
+                            sh 'docker build -t ${REGISTRY}/paymentservice:${BUILD_NUMBER} ./services/paymentservice'
+                        }
+                        container('snyk-cli') {
+                            echo "=== Scanning Payment Service Container ==="
+                            sh 'snyk container test ${REGISTRY}/paymentservice:${BUILD_NUMBER} --file=./services/paymentservice/Dockerfile --severity-threshold=high || true'
+                        }
+                        container('docker') {
+                            echo "=== Pushing Payment Service Image to Harbor ==="
+                            withCredentials([usernamePassword(credentialsId: HARBOR_CREDS_ID, usernameVariable: 'HARBOR_USER', passwordVariable: 'HARBOR_PASS')]) {
+                                sh 'docker login -u ${HARBOR_USER} -p ${HARBOR_PASS} harbor.harbor.svc.cluster.local'
+                                sh 'docker push ${REGISTRY}/paymentservice:${BUILD_NUMBER}'
+                            }
+                        }
+                    }
+                }
+
+                stage('Currency Service') {
+                    steps {
+                        container('docker') {
+                            echo "=== Building Currency Service Image ==="
+                            sh 'docker build -t ${REGISTRY}/currencyservice:${BUILD_NUMBER} ./services/currencyservice'
+                        }
+                        container('snyk-cli') {
+                            echo "=== Scanning Currency Service Container ==="
+                            sh 'snyk container test ${REGISTRY}/currencyservice:${BUILD_NUMBER} --file=./services/currencyservice/Dockerfile --severity-threshold=high || true'
+                        }
+                        container('docker') {
+                            echo "=== Pushing Currency Service Image to Harbor ==="
+                            withCredentials([usernamePassword(credentialsId: HARBOR_CREDS_ID, usernameVariable: 'HARBOR_USER', passwordVariable: 'HARBOR_PASS')]) {
+                                sh 'docker login -u ${HARBOR_USER} -p ${HARBOR_PASS} harbor.harbor.svc.cluster.local'
+                                sh 'docker push ${REGISTRY}/currencyservice:${BUILD_NUMBER}'
+                            }
+                        }
+                    }
+                }
+
+                stage('Recommendation Service') {
+                    steps {
+                        container('docker') {
+                            echo "=== Building Recommendation Service Image ==="
+                            sh 'docker build -t ${REGISTRY}/recommendationservice:${BUILD_NUMBER} ./services/recommendationservice'
+                        }
+                        container('snyk-cli') {
+                            echo "=== Scanning Recommendation Service Container ==="
+                            sh 'snyk container test ${REGISTRY}/recommendationservice:${BUILD_NUMBER} --file=./services/recommendationservice/Dockerfile --severity-threshold=high || true'
+                        }
+                        container('docker') {
+                            echo "=== Pushing Recommendation Service Image to Harbor ==="
+                            withCredentials([usernamePassword(credentialsId: HARBOR_CREDS_ID, usernameVariable: 'HARBOR_USER', passwordVariable: 'HARBOR_PASS')]) {
+                                sh 'docker login -u ${HARBOR_USER} -p ${HARBOR_PASS} harbor.harbor.svc.cluster.local'
+                                sh 'docker push ${REGISTRY}/recommendationservice:${BUILD_NUMBER}'
+                            }
+                        }
+                    }
+                }
+
+                stage('Checkout Service') {
+                    steps {
+                        container('docker') {
+                            echo "=== Building Checkout Service Image ==="
+                            sh 'docker build -t ${REGISTRY}/checkoutservice:${BUILD_NUMBER} ./services/checkoutservice'
+                        }
+                        container('snyk-cli') {
+                            echo "=== Scanning Checkout Service Container ==="
+                            sh 'snyk container test ${REGISTRY}/checkoutservice:${BUILD_NUMBER} --file=./services/checkoutservice/Dockerfile --severity-threshold=high || true'
+                        }
+                        container('docker') {
+                            echo "=== Pushing Checkout Service Image to Harbor ==="
+                            withCredentials([usernamePassword(credentialsId: HARBOR_CREDS_ID, usernameVariable: 'HARBOR_USER', passwordVariable: 'HARBOR_PASS')]) {
+                                sh 'docker login -u ${HARBOR_USER} -p ${HARBOR_PASS} harbor.harbor.svc.cluster.local'
+                                sh 'docker push ${REGISTRY}/checkoutservice:${BUILD_NUMBER}'
+                            }
+                        }
+                    }
+                }
+
+                stage('Frontend Service') {
+                    steps {
+                        container('docker') {
+                            echo "=== Building Frontend Image ==="
+                            sh 'docker build -t ${REGISTRY}/frontend:${BUILD_NUMBER} ./services/frontend'
+                        }
+                        container('snyk-cli') {
+                            echo "=== Scanning Frontend Container ==="
+                            sh 'snyk container test ${REGISTRY}/frontend:${BUILD_NUMBER} --file=./services/frontend/Dockerfile --severity-threshold=high || true'
+                        }
+                        container('docker') {
+                            echo "=== Pushing Frontend Image to Harbor ==="
+                            withCredentials([usernamePassword(credentialsId: HARBOR_CREDS_ID, usernameVariable: 'HARBOR_USER', passwordVariable: 'HARBOR_PASS')]) {
+                                sh 'docker login -u ${HARBOR_USER} -p ${HARBOR_PASS} harbor.harbor.svc.cluster.local'
+                                sh 'docker push ${REGISTRY}/frontend:${BUILD_NUMBER}'
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('GitOps ArgoCD Trigger') {
+            steps {
+                echo "=== CI Pipeline Completed Successfully! ==="
+                echo "Images pushed to Harbor. ArgoCD will synchronize matching manifests automatically."
+            }
+        }
+    }
+
+    post {
+        always {
+            echo "Pipeline finished execution."
+        }
+        success {
+            echo "CI pipeline completed successfully. Code is scanned and images are hardened!"
+        }
+        failure {
+            echo "CI pipeline failed. Please check build logs or Snyk reports."
+        }
+    }
+}

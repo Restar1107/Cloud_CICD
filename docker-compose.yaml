@@ -1,0 +1,157 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    networks:
+      - microservices-net
+
+  productcatalogservice:
+    build:
+      context: ./services/productcatalogservice
+      dockerfile: Dockerfile
+    container_name: productcatalogservice
+    environment:
+      - PORT=3550
+    ports:
+      - "3550:3550"
+    networks:
+      - microservices-net
+
+  currencyservice:
+    build:
+      context: ./services/currencyservice
+      dockerfile: Dockerfile
+    container_name: currencyservice
+    environment:
+      - PORT=7000
+      - DISABLE_PROFILER=1
+    ports:
+      - "7000:7000"
+    networks:
+      - microservices-net
+
+  cartservice:
+    build:
+      context: ./services/cartservice/src
+      dockerfile: Dockerfile
+    container_name: cartservice
+    environment:
+      - PORT=7070
+      - REDIS_ADDR=redis:6379
+    ports:
+      - "7070:7070"
+    depends_on:
+      - redis
+    networks:
+      - microservices-net
+
+  shippingservice:
+    build:
+      context: ./services/shippingservice
+      dockerfile: Dockerfile
+    container_name: shippingservice
+    environment:
+      - PORT=50051
+    ports:
+      - "50053:50051" # 호스트 포트 충돌 방지용 바인딩
+    networks:
+      - microservices-net
+
+  recommendationservice:
+    build:
+      context: ./services/recommendationservice
+      dockerfile: Dockerfile
+    container_name: recommendationservice
+    environment:
+      - PORT=8080
+      - PRODUCT_CATALOG_SERVICE_ADDR=productcatalogservice:3550
+    ports:
+      - "8085:8080" # 호스트 포트 충돌 방지용 바인딩
+    depends_on:
+      - productcatalogservice
+    networks:
+      - microservices-net
+
+  paymentservice:
+    build:
+      context: ./services/paymentservice
+      dockerfile: Dockerfile
+    container_name: paymentservice
+    environment:
+      - PORT=50051
+      - DISABLE_PROFILER=1
+    ports:
+      - "50052:50051" # 호스트 포트 충돌 방지용 바인딩
+    networks:
+      - microservices-net
+
+  emailservice:
+    build:
+      context: ./services/emailservice
+      dockerfile: Dockerfile
+    container_name: emailservice
+    environment:
+      - PORT=8080
+    ports:
+      - "8086:8080" # 호스트 포트 충돌 방지용 바인딩
+    networks:
+      - microservices-net
+
+  checkoutservice:
+    build:
+      context: ./services/checkoutservice
+      dockerfile: Dockerfile
+    container_name: checkoutservice
+    environment:
+      - PORT=5050
+      - PRODUCT_CATALOG_SERVICE_ADDR=productcatalogservice:3550
+      - CART_SERVICE_ADDR=cartservice:7070
+      - CURRENCY_SERVICE_ADDR=currencyservice:7000
+      - PAYMENT_SERVICE_ADDR=paymentservice:50051
+      - SHIPPING_SERVICE_ADDR=shippingservice:50051
+      - EMAIL_SERVICE_ADDR=emailservice:8080
+    ports:
+      - "5050:5050"
+    depends_on:
+      - productcatalogservice
+      - cartservice
+      - currencyservice
+      - paymentservice
+      - shippingservice
+      - emailservice
+    networks:
+      - microservices-net
+
+  frontend:
+    build:
+      context: ./services/frontend
+      dockerfile: Dockerfile
+    container_name: frontend
+    environment:
+      - PORT=8080
+      - PRODUCT_CATALOG_SERVICE_ADDR=productcatalogservice:3550
+      - CURRENCY_SERVICE_ADDR=currencyservice:7000
+      - CART_SERVICE_ADDR=cartservice:7070
+      - RECOMMENDATION_SERVICE_ADDR=recommendationservice:8080
+      - CHECKOUT_SERVICE_ADDR=checkoutservice:5050
+      - SHIPPING_SERVICE_ADDR=shippingservice:50051
+      - AD_SERVICE_ADDR=adservice:9555
+      - SHOPPING_ASSISTANT_SERVICE_ADDR=shoppingassistantservice:9555
+    ports:
+      - "8080:8080"
+    depends_on:
+      - productcatalogservice
+      - currencyservice
+      - cartservice
+      - recommendationservice
+      - checkoutservice
+    networks:
+      - microservices-net
+
+networks:
+  microservices-net:
+    driver: bridge
